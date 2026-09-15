@@ -20,6 +20,7 @@ sums must agree.
 from __future__ import annotations
 
 import multiprocessing
+import os
 import time
 from pathlib import Path
 
@@ -29,9 +30,20 @@ _DEFAULT_BATCH_BYTES = 100 * 1024 * 1024
 
 # Per-batch wall-clock budget. Scaled by the batch's event count and capped so a
 # wedged child cannot block recovery forever.
-_BATCH_TIMEOUT_BASE_S = 120.0
-_BATCH_TIMEOUT_PER_EVENT_S = 0.2
-_BATCH_TIMEOUT_CAP_S = 3600.0
+# Env-overridable: a large backlog (tens of thousands of events) on a CPU
+# embedder legitimately needs more than 0.2 s/event and more than an hour per
+# batch; without the override a slow-but-healthy child is killed as "wedged"
+# and the whole recovery run aborts.
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+_BATCH_TIMEOUT_BASE_S = _env_float("IAI_MCP_DRAIN_BATCH_TIMEOUT_BASE_S", 120.0)
+_BATCH_TIMEOUT_PER_EVENT_S = _env_float("IAI_MCP_DRAIN_BATCH_TIMEOUT_PER_EVENT_S", 0.2)
+_BATCH_TIMEOUT_CAP_S = _env_float("IAI_MCP_DRAIN_BATCH_TIMEOUT_CAP_S", 3600.0)
 
 
 def _count_events(path: Path) -> int:
