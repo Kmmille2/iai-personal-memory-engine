@@ -93,6 +93,10 @@ def fsync_directory(path: str | Path) -> None:
 
     Raises OSError if the directory cannot be opened or flushed.
     """
+    if os.name == "nt":
+        # Windows has no directory fsync and os.open() on a directory raises
+        # PermissionError; NTFS journals the rename/unlink metadata itself.
+        return
     dir_path = str(path)
     dir_fd = os.open(dir_path, os.O_RDONLY)
     try:

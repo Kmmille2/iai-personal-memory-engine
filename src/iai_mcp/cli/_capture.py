@@ -468,12 +468,15 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
         tmp_path = offset_path.parent / (f"{offset_path.name}.tmp{os.getpid()}")
         _write_state_file(tmp_path, str(new_offset))
         os.replace(tmp_path, offset_path)
-        # Rename durability needs the directory entry flushed too.
-        dfd = os.open(str(state_dir), os.O_RDONLY)
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
+        # Rename durability needs the directory entry flushed too. Windows has
+        # no directory fsync and os.open() on a directory raises
+        # PermissionError there (NTFS journals the rename), so skip it.
+        if os.name != "nt":
+            dfd = os.open(str(state_dir), os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
         return 0
     except Exception as e:
         logger.error("capture-turn-deferred failed: %s", e)
@@ -689,6 +692,12 @@ def cmd_capture_hooks_install(args: argparse.Namespace) -> int:
     import stat
 
     target = getattr(args, "target", "claude")
+    # The deployed Stop hooks locate the CLI through ~/.iai-mcp/.cli-path
+    # before a PATH scan; without the seed, a venv/pipx install whose Scripts
+    # dir is not on the hook's PATH logs "iai-mcp CLI not found", exits before
+    # rotating the live spool, and nothing ever drains.
+    from iai_mcp.cli._cowork import _seed_cli_path_cache
+    _seed_cli_path_cache()
     # Under "all", a host whose config dir is absent is skipped — installing
     # would fabricate ~/.cursor / ~/.gemini/config / ~/.hermes / ~/.openclaw
     # on machines that never had the host. Explicit targets install anyway.

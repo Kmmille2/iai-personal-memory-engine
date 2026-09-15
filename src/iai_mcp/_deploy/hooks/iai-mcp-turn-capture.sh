@@ -72,7 +72,11 @@ case "$session_id" in
 esac
 
 PY_SCRIPT='
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows: no fcntl; msvcrt byte-range lock has the same NB semantics
+    fcntl = None
+    import msvcrt
 import hashlib
 import json
 import os
@@ -145,7 +149,10 @@ _lock_fd = os.open(
     os.O_WRONLY | os.O_CREAT, 0o600,
 )
 try:
-    fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    if fcntl is not None:
+        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    else:
+        msvcrt.locking(_lock_fd, msvcrt.LK_NBLCK, 1)
 except OSError:
     # Another carrier is draining this session right now; its walk covers
     # these lines.
@@ -453,12 +460,15 @@ with open(tmp, "w") as _f:
     _f.flush()
     os.fsync(_f.fileno())
 os.replace(tmp, offset)
-# Rename durability needs the directory entry flushed too.
-_dfd = os.open(str(state_dir), os.O_RDONLY)
-try:
-    os.fsync(_dfd)
-finally:
-    os.close(_dfd)
+# Rename durability needs the directory entry flushed too. Windows has no
+# directory fsync and os.open() on a directory raises PermissionError there,
+# which aborted every capture after the spool write; NTFS journals the rename.
+if os.name != "nt":
+    _dfd = os.open(str(state_dir), os.O_RDONLY)
+    try:
+        os.fsync(_dfd)
+    finally:
+        os.close(_dfd)
 # Capture state is published — the freshness gate below must not run
 # inside the capture critical section.
 os.close(_lock_fd)

@@ -263,10 +263,18 @@ def _seed_cli_path_cache() -> None:
             cached = cache.read_text(encoding="utf-8").strip()
             if cached and os.access(cached, os.X_OK):
                 return
-        candidate = Path(sys.argv[0]).resolve()
-        if candidate.name == "iai-mcp" and os.access(candidate, os.X_OK):
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(str(candidate), encoding="utf-8")
+        # Windows console scripts are `iai-mcp.exe`; when argv[0] is not the
+        # entry point (e.g. `python -m iai_mcp`), the CLI still lives beside
+        # the interpreter in a venv/pipx install.
+        exe_name = "iai-mcp.exe" if os.name == "nt" else "iai-mcp"
+        for candidate in (
+            Path(sys.argv[0]).resolve(),
+            Path(sys.executable).resolve().parent / exe_name,
+        ):
+            if candidate.name in ("iai-mcp", "iai-mcp.exe") and os.access(candidate, os.X_OK):
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_text(str(candidate), encoding="utf-8")
+                return
     except OSError:
         pass
 
