@@ -37,18 +37,26 @@ def _quote_if_needed(token: str) -> str:
 
 
 def _short_path(path: Path) -> str:
-    """8.3 form of an existing path (POSIX separators); the long form when the
-    volume has 8.3 names disabled or the path does not exist yet."""
+    """``path`` with every component that contains a space replaced by its 8.3
+    short name (POSIX separators). Components without spaces — including the
+    hook script's own filename, which the installers match on — stay long, so
+    the registration remains readable and marker checks keep working. Falls
+    back to the long form when 8.3 names are unavailable."""
+    long_parts = Path(path).parts
+    if not any(" " in part for part in long_parts):
+        return Path(path).as_posix()
     try:
         import ctypes
 
         buf = ctypes.create_unicode_buffer(32768)
         n = ctypes.windll.kernel32.GetShortPathNameW(str(path), buf, 32768)  # type: ignore[attr-defined]
-        if n and buf.value:
-            return Path(buf.value).as_posix()
+        short_parts = Path(buf.value).parts if n and buf.value else ()
     except Exception:  # noqa: BLE001 -- fall back to the long form
-        pass
-    return path.as_posix()
+        short_parts = ()
+    if len(short_parts) != len(long_parts):
+        return Path(path).as_posix()
+    mixed = [sp if " " in lp else lp for lp, sp in zip(long_parts, short_parts)]
+    return Path(*mixed).as_posix()
 
 
 def _git_bash_path() -> Path | None:
