@@ -493,6 +493,20 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
                 pass
 
 
+def _upsert_hook(entries: list, marker: str, cmd: str, label: str, settings) -> None:
+    # Re-running install repairs a stale registration (e.g. the old unquoted
+    # backslash form) instead of leaving it in place behind the marker check.
+    from iai_mcp.cli._hookcmd import find_hook
+    existing = find_hook(entries, marker)
+    if existing is None:
+        return
+    if existing.get("command") != cmd:
+        existing["command"] = cmd
+        print(f"patched: {settings} ({label} command updated)")
+    else:
+        print(f"settings.json already has {label} — no change")
+
+
 def _capture_hook_paths() -> tuple:
     src = _res.files("iai_mcp") / "_deploy" / "hooks" / "iai-mcp-session-capture.sh"
     dst = Path.home() / ".claude" / "hooks" / "iai-mcp-session-capture.sh"
@@ -770,27 +784,18 @@ def cmd_capture_hooks_install(args: argparse.Namespace) -> int:
     stop_list = data["hooks"].setdefault("Stop", [])
     submit_list = data["hooks"].setdefault("UserPromptSubmit", [])
 
-    hook_cmd = f"bash {dst}"
-    turn_cmd = f"bash {turn_dst}"
+    from iai_mcp.cli._hookcmd import find_hook, hook_command
+    hook_cmd = hook_command(dst)
+    turn_cmd = hook_command(turn_dst)
 
-    already_stop = any(
-        any(_CAPTURE_HOOK_MARKER in (h.get("command") or "")
-            for h in (entry.get("hooks") or []))
-        for entry in stop_list
-    )
-    if already_stop:
-        print(f"settings.json already has Stop hook — no change")
+    if find_hook(stop_list, _CAPTURE_HOOK_MARKER) is not None:
+        _upsert_hook(stop_list, _CAPTURE_HOOK_MARKER, hook_cmd, "Stop hook", settings)
     else:
         stop_list.append({"hooks": [{"type": "command", "command": hook_cmd, "timeout": 35}]})
         print(f"patched: {settings} (Stop hook registered)")
 
-    already_turn = any(
-        any(_TURN_HOOK_MARKER in (h.get("command") or "")
-            for h in (entry.get("hooks") or []))
-        for entry in submit_list
-    )
-    if already_turn:
-        print(f"settings.json already has UserPromptSubmit hook — no change")
+    if find_hook(submit_list, _TURN_HOOK_MARKER) is not None:
+        _upsert_hook(submit_list, _TURN_HOOK_MARKER, turn_cmd, "UserPromptSubmit hook", settings)
     else:
         submit_list.append({"hooks": [{"type": "command", "command": turn_cmd, "timeout": 5}]})
         print(f"patched: {settings} (UserPromptSubmit hook registered)")
@@ -802,14 +807,9 @@ def cmd_capture_hooks_install(args: argparse.Namespace) -> int:
         pt_dst.chmod(pt_dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
         print(f"installed: {pt_dst}")
 
-        pt_cmd = f"bash {pt_dst}"
-        already_pt = any(
-            any(_PER_TURN_RECALL_HOOK_MARKER in (h.get("command") or "")
-                for h in (entry.get("hooks") or []))
-            for entry in submit_list
-        )
-        if already_pt:
-            print("settings.json already has per-turn recall hook — no change")
+        pt_cmd = hook_command(pt_dst)
+        if find_hook(submit_list, _PER_TURN_RECALL_HOOK_MARKER) is not None:
+            _upsert_hook(submit_list, _PER_TURN_RECALL_HOOK_MARKER, pt_cmd, "per-turn recall hook", settings)
         else:
             submit_list.append(
                 {"hooks": [{"type": "command", "command": pt_cmd, "timeout": 5}]}
@@ -826,14 +826,9 @@ def cmd_capture_hooks_install(args: argparse.Namespace) -> int:
         print(f"installed: {dst_recall}")
 
         ss_list = data["hooks"].setdefault("SessionStart", [])
-        recall_cmd = f"bash {dst_recall}"
-        already_recall = any(
-            any(_SESSION_RECALL_HOOK_MARKER in (h.get("command") or "")
-                for h in (entry.get("hooks") or []))
-            for entry in ss_list
-        )
-        if already_recall:
-            print("settings.json already has SessionStart hook — no change")
+        recall_cmd = hook_command(dst_recall)
+        if find_hook(ss_list, _SESSION_RECALL_HOOK_MARKER) is not None:
+            _upsert_hook(ss_list, _SESSION_RECALL_HOOK_MARKER, recall_cmd, "SessionStart hook", settings)
         else:
             ss_list.append({
                 "matcher": "startup|resume|clear|compact",

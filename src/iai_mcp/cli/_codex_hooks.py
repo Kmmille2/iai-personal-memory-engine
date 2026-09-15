@@ -64,6 +64,8 @@ def _entry_has_marker(entry: dict, marker: str) -> bool:
 
 
 def install_codex_hooks() -> int:
+    from iai_mcp.cli._hookcmd import find_hook, hook_command
+
     hooks_dir, hooks_json = _codex_paths()
 
     templates = _res.files("iai_mcp") / "_deploy" / "hooks"
@@ -84,14 +86,22 @@ def install_codex_hooks() -> int:
     changed = False
     for event, marker, timeout, matcher in _EVENT_WIRING:
         entries = events.setdefault(event, [])
-        if any(_entry_has_marker(e, marker) for e in entries if isinstance(e, dict)):
-            print(f"hooks.json already wires {marker} on {event} — no change")
+        cmd = hook_command(hooks_dir / marker)
+        existing = find_hook(entries, marker)
+        if existing is not None:
+            if existing.get("command") != cmd:
+                # Repair a stale form (unquoted backslash path) in place.
+                existing["command"] = cmd
+                changed = True
+                print(f"patched: {hooks_json} ({event}: {marker} command updated)")
+            else:
+                print(f"hooks.json already wires {marker} on {event} — no change")
             continue
         entry: dict = {
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"bash {hooks_dir / marker}",
+                    "command": cmd,
                     "timeout": timeout,
                 }
             ]

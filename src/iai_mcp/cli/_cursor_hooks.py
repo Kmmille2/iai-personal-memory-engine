@@ -57,6 +57,8 @@ def _load_hooks_json(path: Path) -> "dict | None":
 
 
 def install_cursor_hooks() -> int:
+    from iai_mcp.cli._hookcmd import hook_command
+
     hooks_dir, hooks_json = _cursor_paths()
 
     templates = _res.files("iai_mcp") / "_deploy" / "hooks"
@@ -84,14 +86,20 @@ def install_cursor_hooks() -> int:
     changed = False
     for event, marker in _EVENT_WIRING:
         entries = events.setdefault(event, [])
-        if any(
-            marker in (e.get("command") or "")
-            for e in entries
-            if isinstance(e, dict)
-        ):
-            print(f"hooks.json already wires {marker} on {event} — no change")
+        cmd = hook_command(hooks_dir / marker)
+        existing = next(
+            (e for e in entries if isinstance(e, dict) and marker in (e.get("command") or "")),
+            None,
+        )
+        if existing is not None:
+            if existing.get("command") != cmd:
+                existing["command"] = cmd
+                changed = True
+                print(f"patched: {hooks_json} ({event}: {marker} command updated)")
+            else:
+                print(f"hooks.json already wires {marker} on {event} — no change")
             continue
-        entries.append({"command": f"bash {hooks_dir / marker}"})
+        entries.append({"command": cmd})
         changed = True
         print(f"patched: {hooks_json} ({event}: {marker})")
 
