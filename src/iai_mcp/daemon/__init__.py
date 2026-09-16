@@ -726,6 +726,28 @@ _CAPTURE_DRAIN_MAX_RECORDS_DEFAULT: int = 500
 _CAPTURE_DRAIN_BUDGET_SEC_DEFAULT: float = 10.0
 
 
+def _env_float_default(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+#: Startup drain: a busy background gate at boot (graph preload, community
+#: detection over a large store) defers the drain; retry on this cadence
+#: instead of losing it until the next drowsy edge.
+_BOOT_DRAIN_RETRY_SEC: float = _env_float_default("IAI_MCP_BOOT_DRAIN_RETRY_SEC", 120.0)
+_BOOT_DRAIN_MAX_ATTEMPTS: int = int(_env_float_default("IAI_MCP_BOOT_DRAIN_MAX_ATTEMPTS", 30))
+#: WAKE-idle drain: with a host still open the wrapper heartbeat keeps the
+#: FSM in WAKE and the drowsy edge never comes, so nothing captured today is
+#: recallable today. When OS input idle (HIDIdleTime / logind /
+#: GetLastInputInfo) shows the human away for this long, run the drowsy-edge
+#: drain anyway, at most once per interval. 0 disables.
+_WAKE_IDLE_DRAIN_SEC: float = _env_float_default("IAI_MCP_WAKE_IDLE_DRAIN_SEC", 300.0)
+_WAKE_IDLE_DRAIN_INTERVAL_SEC: float = _env_float_default("IAI_MCP_WAKE_IDLE_DRAIN_INTERVAL_SEC", 600.0)
+_last_wake_idle_drain_mono: list[float] = [0.0]
+
+
 def _capture_drain_max_records() -> int | None:
     raw = os.environ.get("IAI_MCP_CAPTURE_DRAIN_MAX_RECORDS")
     if raw is None:
@@ -2053,7 +2075,20 @@ async def main() -> int:
 
             async def _drain_and_report() -> None:
                 try:
-                    drain_counts = await asyncio.to_thread(_drain_body)
+                    # _drain_body returns {} when the gate refused: retry on
+                    # a cadence rather than dropping the startup drain.
+                    drain_counts: dict = {}
+                    for _attempt in range(max(1, _BOOT_DRAIN_MAX_ATTEMPTS)):
+                        drain_counts = await asyncio.to_thread(_drain_body)
+                        if drain_counts:
+                            break
+                        log.info(
+                            "startup deferred drain deferred by the background gate "
+                            "(attempt %d); retrying in %.0fs",
+                            _attempt + 1,
+                            _BOOT_DRAIN_RETRY_SEC,
+                        )
+                        await asyncio.sleep(_BOOT_DRAIN_RETRY_SEC)
                     if drain_counts.get("files_drained") or drain_counts.get(
                         "files_failed"
                     ):
@@ -2527,6 +2562,29 @@ async def main() -> int:
                             await _pending_embed_pass()
                         except Exception:  # noqa: BLE001 -- wake sequence non-fatal
                             log.debug("lifecycle_tick pending_embeddings_wake_sequence failed", exc_info=True)
+
+                    # WAKE-idle drain (see _WAKE_IDLE_DRAIN_SEC): the human is
+                    # away by OS input idle but a host is still open, so the
+                    # drowsy edge never comes. Same bounded drain as that edge.
+                    if (
+                        _WAKE_IDLE_DRAIN_SEC > 0
+                        and os_idle_sec is not None
+                        and float(os_idle_sec) >= _WAKE_IDLE_DRAIN_SEC
+                        and _state_machine.current_state is _LifecycleState.WAKE
+                        and now_mono - _last_wake_idle_drain_mono[0] >= _WAKE_IDLE_DRAIN_INTERVAL_SEC
+                    ):
+                        _last_wake_idle_drain_mono[0] = now_mono
+                        try:
+                            from iai_mcp.capture import drain_capture_backlog as _wake_drain_fn
+
+                            await asyncio.to_thread(
+                                _run_drowsy_drain,
+                                store,
+                                drain_fn=_wake_drain_fn,
+                                write_event_fn=write_event,
+                            )
+                        except Exception:  # noqa: BLE001 -- wake-idle drain non-fatal
+                            log.debug("lifecycle_tick wake-idle drain failed", exc_info=True)
 
                     # A pending-embed backlog must never wait on the drowsy
                     # edge alone: a daemon that boots straight into SLEEP (or

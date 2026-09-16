@@ -230,7 +230,40 @@ class IdleDetector:
             if not session_paths:
                 return None, None
             return self._logind_aggregate_idle(session_paths), "logind"
+        if system == "Windows":
+            idle_sec = self.windows_idle_time_sec()
+            return idle_sec, ("GetLastInputInfo" if idle_sec is not None else None)
         return None, None
+
+
+    def windows_idle_time_sec(self) -> int | None:
+        """Seconds since the last keyboard/mouse input in this interactive
+        session (user32 ``GetLastInputInfo``), the Windows counterpart of
+        HIDIdleTime. Without it the daemon can only judge idleness by the
+        wrapper heartbeat, which stays fresh while any host is open — so it
+        never reaches DROWSY, never drains captures, and never consolidates.
+        ``None`` when the call fails or no input has been seen in this
+        session (session 0 / service context), so callers fall back."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _LastInputInfo(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+            info = _LastInputInfo()
+            info.cbSize = ctypes.sizeof(_LastInputInfo)
+            if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):  # type: ignore[attr-defined]
+                return None
+            if info.dwTime == 0:
+                return None
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            kernel32.GetTickCount64.restype = ctypes.c_ulonglong
+            now_ms = int(kernel32.GetTickCount64()) & 0xFFFFFFFF
+            # dwTime is a 32-bit tick; subtract modulo 2**32 to survive wrap.
+            return ((now_ms - int(info.dwTime)) & 0xFFFFFFFF) // 1000
+        except Exception:  # noqa: BLE001 -- probe must never raise into the tick
+            return None
 
 
     def sleep_eligible(
@@ -301,6 +334,11 @@ class IdleDetector:
         if "logind" in status.available_signals:
             detail = (
                 f"logind IdleHint: {idle_str('not idle')}, available: {signals_str}"
+            )
+            return detail, "PASS"
+        if "GetLastInputInfo" in status.available_signals:
+            detail = (
+                f"GetLastInputInfo: {idle_str('unavailable')}, available: {signals_str}"
             )
             return detail, "PASS"
         detail = (
