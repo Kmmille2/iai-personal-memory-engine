@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -186,6 +187,25 @@ def load_state(path: Path | None = None) -> LifecycleStateRecord:
         return default_state()
 
 
+def _replace_with_retry(tmp: str, target: Path, attempts: int = 8, delay_s: float = 0.05) -> None:
+    """``os.replace`` with a short retry on Windows.
+
+    A reader that has the target open (a hook or CLI ``load_state``, a backup
+    copy) makes the rename fail immediately with ``PermissionError``
+    (WinError 5) instead of waiting; the sleep pipeline then aborted its whole
+    cycle on a state save that would have succeeded 50 ms later. POSIX
+    renames never contend this way, so the retry is Windows-only.
+    """
+    for attempt in range(attempts):
+        try:
+            os.replace(tmp, target)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == attempts - 1:
+                raise
+            time.sleep(delay_s * (attempt + 1))
+
+
 def save_state(record: LifecycleStateRecord, path: Path | None = None) -> None:
     target = path if path is not None else LIFECYCLE_STATE_PATH
     _validate_record(record)
@@ -203,7 +223,7 @@ def save_state(record: LifecycleStateRecord, path: Path | None = None) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.chmod(tmp, 0o600)
-        os.replace(tmp, target)
+        _replace_with_retry(tmp, target)
         replaced = True
     finally:
         if not replaced:
