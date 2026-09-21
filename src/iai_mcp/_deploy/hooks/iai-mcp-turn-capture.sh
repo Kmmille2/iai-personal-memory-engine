@@ -16,6 +16,10 @@ if [ -z "$PYBIN" ] && command -v py >/dev/null 2>&1; then
   PYBIN=$(py -3 -c "import sys; print(sys.executable)" 2>/dev/null)
 fi
 [ -n "$PYBIN" ] || PYBIN=/usr/bin/python3
+# Windows: Python text I/O defaults to the ANSI code page (cp1252), so a turn
+# containing a character outside it raised UnicodeEncodeError while spooling and
+# the whole batch was lost. UTF-8 mode makes every open() UTF-8 on all platforms.
+export PYTHONUTF8=1
 # --- end iai-pme interpreter resolution ---
 # IAI-MCP UserPromptSubmit hook — per-turn ambient capture.
 #
@@ -406,8 +410,15 @@ if total > prev:
             if role == "user" and not text:
                 # Conversational user boundary with no recordable text (a
                 # noise line, not a tool result): mechanics of the previous
-                # response must not leak across it.
+                # response must not leak across it. Spool a marker (never a
+                # record) so the final-answer policy of the drain knows the next
+                # assistant text answers a system event, not the user.
                 pending_tools = []
+                out.write(json.dumps({
+                    "text": "", "cue": "", "tier": "episodic", "role": "user",
+                    "boundary": True,
+                    "ts": src_ts if src_ts else datetime.now(timezone.utc).isoformat(),
+                }, ensure_ascii=False) + "\n")
                 continue
             if role == "assistant":
                 # The floor guards the BARE text: a trailer must never turn

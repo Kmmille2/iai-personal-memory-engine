@@ -850,6 +850,114 @@ def _is_noise(text: str) -> bool:
     return False
 
 
+CAPTURE_POLICY_ENV = "IAI_MCP_CAPTURE_POLICY"
+
+
+def capture_policy() -> str:
+    """``all`` (default) stores every conversational event. ``final`` stores
+    each user prompt plus only the LAST assistant text of the turn it opened:
+    mid-turn narration and status updates never become records, which is where
+    most of an agent transcript's volume is."""
+    raw = os.environ.get(CAPTURE_POLICY_ENV, "").strip().lower()
+    return "final" if raw == "final" else "all"
+
+
+def select_policy_lines(event_lines: "list[str]") -> "tuple[list[str], int]":
+    """Apply the ``final`` policy to one spool file's event lines (header
+    excluded). Returns ``(kept_lines, dropped_count)`` with the original
+    (possibly encrypted) lines preserved byte-for-byte.
+
+    A turn opened by a real user prompt keeps the prompt and its last assistant
+    text. A turn opened by a boundary marker or a noise-only user line (task
+    notifications, command echoes) keeps nothing: the assistant text there is a
+    reply to a system event, not an answer. Anything that is not an episodic
+    user/assistant event passes through untouched. Raises SpoolKeyUnavailable
+    so the caller can leave the file for a keyed pass.
+    """
+    kept: "list[str]" = []
+    dropped = 0
+    held: "str | None" = None
+    turn_real = True
+
+    def _flush() -> None:
+        nonlocal held, dropped
+        if held is None:
+            return
+        if turn_real:
+            kept.append(held)
+        else:
+            dropped += 1
+        held = None
+
+    for ln in event_lines:
+        try:
+            ev = json.loads(_decode_spool_line(ln))
+        except SpoolKeyUnavailable:
+            raise
+        except (json.JSONDecodeError, ValueError, TypeError):
+            kept.append(ln)
+            continue
+        if not isinstance(ev, dict):
+            kept.append(ln)
+            continue
+        role = ev.get("role", "user")
+        if ev.get("tier", "episodic") != "episodic" or role not in ("user", "assistant"):
+            kept.append(ln)
+            continue
+        text = (ev.get("text") or "").strip()
+        if role == "user":
+            _flush()
+            if ev.get("boundary") or not text or _is_noise(text):
+                turn_real = False
+                dropped += 1
+                continue
+            turn_real = True
+            kept.append(ln)
+            continue
+        if not text:
+            dropped += 1
+            continue
+        if held is not None:
+            dropped += 1
+        held = ln
+    _flush()
+    return kept, dropped
+
+
+def _apply_capture_policy_to_file(work_path: Path) -> int:
+    """Rewrite a CLAIMED spool file in place under the ``final`` policy.
+    Returns the number of dropped events; 0 when the policy is off, the file
+    has no header, or nothing was dropped. Never raises: on any failure the
+    file is left exactly as it was and the drain proceeds unfiltered."""
+    if capture_policy() != "final":
+        return 0
+    try:
+        with work_path.open(encoding="utf-8") as fh:
+            lines = [ln.rstrip("\n") for ln in fh if ln.strip()]
+        if len(lines) < 3:
+            return 0
+        header = json.loads(_decode_spool_line(lines[0]))
+        if not (isinstance(header, dict) and "version" in header):
+            return 0
+        kept, dropped = select_policy_lines(lines[1:])
+        if not dropped:
+            return 0
+        tmp = work_path.with_suffix(".policy.tmp")
+        with tmp.open("w", encoding="utf-8") as out:
+            out.write(lines[0] + "\n")
+            for ln in kept:
+                out.write(ln + "\n")
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, work_path)
+        return dropped
+    except SpoolKeyUnavailable:
+        return 0
+    except Exception as exc:  # noqa: BLE001 -- policy is an optimisation, never a blocker
+        log.warning("capture policy rewrite failed for %s: %s", work_path.name, exc)
+        return 0
+
+
 def _tools_trailer(names: "list[str]") -> str:
     """Labeled trace of the tools a response invoked, appended to its text.
 
@@ -957,6 +1065,10 @@ class _ToolTrailerState:
         self._pending: "list[str]" = [
             n for n in (pending or []) if isinstance(n, str) and n
         ]
+        #: True when the most recent feed() consumed a conversational user
+        #: boundary that produced no record (noise-only user line). Carriers
+        #: that spool events use it to write a boundary marker.
+        self.boundary_seen: bool = False
 
     @property
     def pending(self) -> "list[str]":
@@ -970,6 +1082,7 @@ class _ToolTrailerState:
         msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
         obj_role = obj.get("type") or msg.get("role") or obj.get("role", "")
         tools = _tool_names_for_obj(obj, msg, obj_role)
+        self.boundary_seen = False
         if parsed is None:
             # Action-only assistant entries carry the mechanics of the
             # episode; their tool names ride the response's next text
@@ -979,6 +1092,7 @@ class _ToolTrailerState:
                 self._pending.extend(tools)
             elif _is_user_boundary(obj, msg, obj_role):
                 self._pending = []
+                self.boundary_seen = True
             return None
         role, text, src_uuid, ts = parsed
         if role == "assistant":
@@ -1251,6 +1365,7 @@ def write_deferred_event(
     cwd: str | None = None,
     ts: str | None = None,
     source_uuid: str | None = None,
+    boundary: bool = False,
 ) -> Path:
     deferred_dir = deferred_captures_dir()
     deferred_dir.mkdir(parents=True, exist_ok=True)
@@ -1292,6 +1407,10 @@ def write_deferred_event(
         }
         if source_uuid:
             event["source_uuid"] = source_uuid
+        if boundary:
+            # Never becomes a record (empty text); it only tells the drain's
+            # capture policy where a system-opened turn starts.
+            event["boundary"] = True
         fh.write(_encode_spool_line(event) + "\n")
         fh.flush()
         try:
@@ -1873,6 +1992,7 @@ def _drain_deferred_captures_locked(
                 log.debug("claim_failed_log_write_failed: %s", exc)
             continue
         work_path = claim_path
+        counts["events_skipped_intentional"] += _apply_capture_policy_to_file(work_path)
 
         file_had_insert_failure = False
         file_first_error: str | None = None
@@ -2481,6 +2601,7 @@ def drain_active_live_captures(
 
         new_offset = prev_offset
         file_had_insert = False
+        _final_only = capture_policy() == "final"
         for ln in new_lines:
             try:
                 ev = json.loads(_decode_spool_line(ln))
@@ -2489,6 +2610,20 @@ def drain_active_live_captures(
                 # cannot decrypt — a keyed pass picks up exactly here.
                 break
             except (json.JSONDecodeError, ValueError):
+                new_offset += 1
+                counts["events_skipped"] += 1
+                continue
+            if isinstance(ev, dict) and (
+                ev.get("boundary")
+                or (
+                    _final_only
+                    and ev.get("role") == "assistant"
+                    and ev.get("tier", "episodic") == "episodic"
+                )
+            ):
+                # A live spool is mid-turn: which assistant text is final is
+                # only knowable once the Stop hook rotates the file, and the
+                # rotated-file drain selects it there. Prompts promote now.
                 new_offset += 1
                 counts["events_skipped"] += 1
                 continue

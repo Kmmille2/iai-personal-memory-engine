@@ -50,7 +50,9 @@ def _drain_files(store, paths) -> dict:  # noqa: ANN001
         _idem_tag,
         _is_episodic_conversational,
         _resolve_ts,
+        capture_policy,
         capture_turn,
+        select_policy_lines,
     )
 
     inserted = 0
@@ -82,8 +84,20 @@ def _drain_files(store, paths) -> dict:  # noqa: ANN001
             continue
         session_id = header.get("session_id", "-")
 
+        event_lines = lines[1:]
+        if capture_policy() == "final":
+            try:
+                event_lines, _dropped = select_policy_lines(
+                    [ln.rstrip("\n") for ln in event_lines]
+                )
+            except SpoolKeyUnavailable:
+                continue
+            # Keep the partition invariant: dropped events were seen and skipped.
+            events_seen += _dropped
+            skipped += _dropped
+
         key_deferred = False
-        for ln in lines[1:]:
+        for ln in event_lines:
             events_seen += 1
             try:
                 ev = json.loads(_decode_spool_line(ln))

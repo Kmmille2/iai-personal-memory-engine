@@ -16,6 +16,10 @@ if [ -z "$PYBIN" ] && command -v py >/dev/null 2>&1; then
   PYBIN=$(py -3 -c "import sys; print(sys.executable)" 2>/dev/null)
 fi
 [ -n "$PYBIN" ] || PYBIN=/usr/bin/python3
+# Windows: Python text I/O defaults to the ANSI code page (cp1252), so a turn
+# containing a character outside it raised UnicodeEncodeError while spooling and
+# the whole batch was lost. UTF-8 mode makes every open() UTF-8 on all platforms.
+export PYTHONUTF8=1
 # --- end iai-pme interpreter resolution ---
 # Per-turn context injection for Claude Code (UserPromptSubmit hook).
 #

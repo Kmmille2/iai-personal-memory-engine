@@ -430,6 +430,13 @@ def cmd_capture_turn_deferred(args: argparse.Namespace) -> int:
                 _obj, _parse_transcript_obj(_obj) if _obj else None
             )
             if parsed is None:
+                if trailers.boundary_seen:
+                    write_deferred_event(
+                        args.session_id, "user", "",
+                        cwd=cwd,
+                        ts=_obj.get("timestamp") if isinstance(_obj.get("timestamp"), str) else None,
+                        boundary=True,
+                    )
                 continue
             role, text, src_uuid, src_ts = parsed
             write_deferred_event(
