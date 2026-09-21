@@ -567,7 +567,13 @@ def capture_turn(
             stability=0.0,
             difficulty=0.0,
             last_reviewed=None,
-            never_decay=False,
+            # Promotion path: ambient capture is always episodic and is allowed
+            # to fade (the erasure agent sweeps records that are old, peripheral
+            # and never recalled). A semantic or procedural capture is a
+            # deliberate act — a settled decision, a root cause, a convention —
+            # and must survive that sweep, or nothing an agent saves on purpose
+            # outlives the window.
+            never_decay=tier in ("semantic", "procedural"),
             never_merge=False,
             provenance=provenance_list,
             created_at=now,
