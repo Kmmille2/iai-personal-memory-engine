@@ -8,6 +8,7 @@ for the sleep pipeline's eligibility gate. Pinned records refuse the hint.
 from __future__ import annotations
 
 import json
+import os
 import logging
 import threading
 import time
@@ -234,6 +235,14 @@ class BrainView:
         if not ignore_cooldown and time.monotonic() < self._relay_down_until:
             return False
         try:
+            from iai_mcp._ipc import IS_WINDOWS
+
+            if IS_WINDOWS:
+                # Windows IPC is TCP loopback: there is no socket file, the
+                # daemon's liveness marker is .daemon.port. Without this every
+                # write verb (rescue, pin, forget_hint, capture, teach) skipped
+                # the relay and was refused by the daemon's own store lock.
+                return (self.root / ".daemon.port").is_file()
             return self._socket_path().is_socket()
         except OSError:
             return False
@@ -829,7 +838,12 @@ class BrainView:
 
         daemon_up = False
         try:
-            daemon_up = (Path(self.store.root) / ".daemon.sock").is_socket()
+            _root = Path(self.store.root)
+            daemon_up = (
+                (_root / ".daemon.port").is_file()
+                if os.name == "nt"
+                else (_root / ".daemon.sock").is_socket()
+            )
         except Exception:  # noqa: BLE001 -- presence probe is cosmetic
             daemon_up = False
         return {
